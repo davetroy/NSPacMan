@@ -1,8 +1,7 @@
 # NSPacMan
 
 A Pac-Man–style arcade game for the **NorthStar Advantage** (1982) — written
-from scratch in Z80 assembly, forty-four years after the machine shipped
-without a single game worth playing on it.
+from scratch in Z80 assembly.
 
 ![NSPacMan running](screenshot.png)
 
