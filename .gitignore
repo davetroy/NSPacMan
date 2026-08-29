@@ -1,0 +1,8 @@
+/*.bin
+/*.nsi
+/*.hfe
+/assets.inc
+.DS_Store
+vars.raw
+*.raw
+probe.*
