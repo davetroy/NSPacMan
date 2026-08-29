@@ -16,8 +16,8 @@ DISK_SIZE   = 358400
 SECTOR      = 512
 STAGE1_OFF  = 0x800            # track 0, sector 4
 STAGE1_MAX  = 4 * SECTOR       # PROM reads 4 sectors
-STAGE2_OFF  = 0x1400           # track 1, sector 0
-STAGE2_MAX  = 10 * SECTOR      # one track (loader reads 10 sectors)
+STAGE2_OFF  = 0x1400           # track 1, sector 0 (track 2 = 0x2800)
+STAGE2_MAX  = 20 * SECTOR      # two tracks (loader reads both)
 LOAD_PAGE   = 0xC1
 
 
@@ -33,13 +33,17 @@ def build(stage1_path, stage2_path, out_path):
         sys.exit(f"stage1 {len(s1)} > {STAGE1_MAX} byte boot window")
     if len(s2) > STAGE2_MAX:
         sys.exit(f"stage2 {len(s2)} > {STAGE2_MAX} bytes (one track). "
-                 f"Extend the loader to read a second track.")
+                 f"(two-track limit)")
 
     img = bytearray(DISK_SIZE)
     label = b"NSPACMAN for the NorthStar Advantage"
     img[0:len(label)] = label
     img[STAGE1_OFF:STAGE1_OFF + len(s1)] = s1
-    img[STAGE2_OFF:STAGE2_OFF + len(s2)] = s2
+    t1 = s2[:10*SECTOR]
+    t2 = s2[10*SECTOR:]
+    img[STAGE2_OFF:STAGE2_OFF + len(t1)] = t1
+    if t2:
+        img[0x2800:0x2800 + len(t2)] = t2
 
     open(out_path, "wb").write(img)
     print(f"wrote {out_path}: {DISK_SIZE} bytes (DSDD)")

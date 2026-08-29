@@ -47,6 +47,10 @@ introfl:  equ 0ca6ah              ; play the intro tune at next READY
 pillvis:  equ 0ca6bh              ; power pills currently lit?
 sirph:    equ 0ca6ch              ; siren triangle phase (mothballed)
 chaink:   equ 0ca6dh              ; ghost-eat chain within one pill
+level:    equ 0ca6eh              ; mazes completed this game
+bonusfl:  equ 0ca6fh              ; extra life awarded?
+csx:      equ 0ca80h              ; cutscene pac x
+csnp:     equ 0ca82h              ; cutscene tune pointer (2)
 work:     equ 0ca70h              ; 5 x 4: new px,py,glyph,dirty
 
         org 08000h
@@ -86,12 +90,22 @@ newgame:
         ld   (scorehi),a
         ld   a,3
         ld   (lives),a
+        xor  a
+        ld   (level),a
+        ld   (bonusfl),a
         ld   a,1
         ld   (introfl),a
 
 newlevel:
         call initdots
         call cls
+        ld   hl,lastt+3         ; fresh canvas: forget on-screen sprites
+        ld   de,4
+        ld   b,5
+nl1:
+        ld   (hl),0
+        add  hl,de
+        djnz nl1
         call drawmaze
         call drawhud
 
@@ -114,6 +128,7 @@ mainloop:
         ld   a,(hudflag)
         or   a
         call nz,drawscore
+        call ckbonus
         call sndplay
         ld   hl,(frtimer)
         ld   a,h
@@ -135,6 +150,11 @@ ml1:
         or   (hl)
         jp   nz,mainloop
         call sndwin
+        ld   hl,level
+        inc  (hl)
+        ld   a,(hl)
+        and  1
+        call z,cutscene         ; intermission after every second maze
         jp   newlevel
 
 ; ---------------------------------------------------------------------------
@@ -1459,6 +1479,174 @@ s400:   db "400",0
 s800:   db "800",0
 s1600:  db "1600",0
 
+; ckbonus — one extra life at 10,000 points
+ckbonus:
+        ld   a,(bonusfl)
+        or   a
+        ret  nz
+        ld   a,(scorehi)
+        cp   10h                ; BCD 1000 x10 = 10,000
+        ret  c
+        ld   a,1
+        ld   (bonusfl),a
+        ld   hl,lives
+        inc  (hl)
+        call drawlives
+        ld   hl,sndreq
+        ld   a,(hl)
+        or   8
+        ld   (hl),a
+        ret
+
+sndbonus:                       ; rapid rising chirps
+        ld   e,90
+sb1:
+        ld   d,0
+        ld   b,4
+        call tone16
+        ld   a,e
+        sub  11
+        ld   e,a
+        cp   28
+        jr   nc,sb1
+        ret
+
+; ---------------------------------------------------------------------------
+; cutscene — intermission after every second maze: a two-act chase across a
+; dark stage with its own looping tune (original music and choreography).
+; ---------------------------------------------------------------------------
+cutscene:
+        call sprwipe
+        call cls
+        ld   hl,cstune
+        ld   (csnp),hl
+        xor  a                  ; act 1: ghost flees right, pac in pursuit
+        ld   (csx),a
+csA:
+        call csstep
+        ld   a,(csx)
+        add  a,3
+        ld   (csx),a
+        cp   180
+        jr   c,csA
+        ld   a,220              ; act 2: frightened ghost flees left
+        ld   (csx),a
+csB:
+        call csstepB
+        ld   a,(csx)
+        sub  4
+        ld   (csx),a
+        cp   60
+        jr   nc,csB
+        ld   d,24               ; the catch: pop star + fanfare
+        ld   e,112
+        call cswipe
+        ld   a,11
+        call sprdraw
+        call sndeatg
+        jp   sndwin
+
+csstep:                         ; act 1 frame
+        ld   a,(csx)
+        ld   d,a
+        ld   e,112
+        call cswipe
+        push de
+        ld   a,d
+        add  a,40
+        ld   d,a
+        call cswipe
+        ld   a,5                ; ghost
+        call sprdraw
+        pop  de
+        ld   a,(csx)
+        rrca
+        and  1
+        jr   z,cs1
+        ld   a,1                ; pac chomping right
+        jr   cs2
+cs1:
+        xor  a
+cs2:
+        call sprdraw
+        jp   csnote
+
+csstepB:                        ; act 2 frame
+        ld   a,(csx)
+        ld   d,a
+        ld   e,112
+        call cswipe
+        push de
+        ld   a,d
+        sub  40
+        ld   d,a
+        call cswipe
+        ld   a,6                ; frightened ghost
+        call sprdraw
+        pop  de
+        ld   a,(csx)
+        rrca
+        and  1
+        jr   z,cs3
+        ld   a,2                ; pac chomping left
+        jr   cs4
+cs3:
+        xor  a
+cs4:
+        call sprdraw
+        jp   csnote
+
+; cswipe — zero a 5-col x 8-row band at logical px D, py E (black stage)
+cswipe:
+        push de
+        push bc
+        ld   a,d
+        rrca
+        rrca
+        and  3fh
+        add  a,LEFT_COL-1
+        ld   h,a
+        ld   b,5
+cw1:
+        ld   l,e
+        ld   c,8
+cw2:
+        ld   (hl),0
+        inc  l
+        dec  c
+        jr   nz,cw2
+        inc  h
+        djnz cw1
+        pop  bc
+        pop  de
+        ret
+
+; csnote — next note of the looping intermission tune
+csnote:
+        push de
+        ld   hl,(csnp)
+        ld   a,(hl)
+        or   a
+        jr   nz,csn1
+        ld   hl,cstune
+        ld   a,(hl)
+csn1:
+        ld   e,a
+        inc  hl
+        ld   b,(hl)
+        inc  hl
+        ld   (csnp),hl
+        ld   d,0
+        call tone16
+        pop  de
+        ret
+cstune:                         ; (half-period, cycles): bouncy 16-note loop
+        db 147,37, 117,47, 98,56, 74,74
+        db 98,56,  74,74,  58,95, 74,74
+        db 87,63,  110,50, 87,63, 74,74
+        db 78,70,  98,56,  65,84, 74,74
+        db 0
+
 ; sndplay — play whatever the frame queued, after sprites are on screen
 sndplay:
         ld   a,(sndreq)
@@ -1473,6 +1661,9 @@ sndplay:
         ld   a,b
         and  4
         jp   nz,sndeatg
+        ld   a,b
+        and  8
+        jp   nz,sndbonus
         jp   sndwaka
 
 ; sprvid — doubled screen: H = LEFT_COL + px>>2, L = py, A = px&3
@@ -2165,15 +2356,16 @@ dl_r:
         cp   11
         jr   nz,dl_c
         ld   a,(lives)
-        or   a
+        dec  a                  ; spares only, not the life in play
         ret  z
+        ret  m
         ld   b,a
         ld   c,1
 dl_1:
         push bc
         ld   h,c
         ld   l,44
-        ld   de,glyphs          ; pac_closed, doubled
+        ld   de,glyphs+8        ; pac_r: mouth open, doubled
         ld   b,8
 dl_2:
         ld   a,(de)
@@ -2299,6 +2491,12 @@ kpoll:
         jr   nc,kp1
         sub  20h                ; to upper
 kp1:
+        cp   'N'                ; N = finish maze now (skip / cutscene test)
+        jr   nz,kpn
+        ld   hl,0
+        ld   (dotslo),hl
+        ret
+kpn:
         ld   hl,keytab
 kp2:
         ld   b,(hl)

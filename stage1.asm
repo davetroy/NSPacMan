@@ -51,6 +51,7 @@ crsp:     equ 0c925h              ; motor-off (0x0E) sightings
 seen2:    equ 0c930h              ; 16 flags: raw STAT2 nibbles during mark timeouts
 remain:   equ 0c90ah
 budget:   equ 0c90bh
+dstpg:    equ 0c90dh              ; high byte of current track's load base
 rowy:     equ 0c90ch
 
         org 0c100h
@@ -113,15 +114,40 @@ cli:
         ld   (hl),a
         inc  hl
         djnz cli
+        ld   a,DEST/256
+        ld   (dstpg),a
+        call loadtrk                    ; track 1 -> 0x8000
+
+        ld   a,DCTL                     ; step in to track 2
+        out  (FDC_SYNC),a
+        or   10h
+        out  (FDC_SYNC),a
+        xor  10h
+        out  (FDC_SYNC),a
+        ld   a,28h
+        call dly
+        ld   a,94h                      ; -> 0x9400 (0x8000 + 10 sectors)
+        ld   (dstpg),a
+        call loadtrk
+        jp   DEST
+
+; loadtrk — read all ten sectors of the current track to (dstpg)<<8
+loadtrk:
+        ld   hl,flags
+        ld   b,NSEC
+        xor  a
+ltf1:
+        ld   (hl),a
+        inc  hl
+        djnz ltf1
         ld   a,NSEC
         ld   (remain),a
         ld   a,200                      ; mark-cycle budget
         ld   (budget),a
-
 main:
         ld   a,(remain)
         or   a
-        jp   z,DEST                     ; all ten in -> stage 2
+        ret  z                          ; track done
         ld   a,(budget)
         dec  a
         ld   (budget),a
@@ -487,9 +513,11 @@ v_got:
         jp   rs_clr
 v_sy:
         in   a,(FDC_DATA)               ; second 0xFB, discard
-        ld   a,e                        ; DE = DEST + target*512
+        ld   a,e                        ; DE = (dstpg<<8) + target*512
         add  a,a
-        add  a,DEST/256
+        ld   d,a
+        ld   a,(dstpg)
+        add  a,d
         ld   d,a
         ld   c,e                        ; C = target again
         ld   e,0
