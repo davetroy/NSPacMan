@@ -51,6 +51,11 @@ level:    equ 0ca6eh              ; mazes completed this game
 bonusfl:  equ 0ca6fh              ; extra life awarded?
 csx:      equ 0ca80h              ; cutscene pac x
 csnp:     equ 0ca82h              ; cutscene tune pointer (2)
+hsidx:    equ 0ca84h              ; high-score insertion index
+hsins:    equ 0ca85h              ; -> initials slot in table (2)
+HST:      equ 0cb00h              ; 10 entries x 5: I,I,I,scorehi,scorelo
+SAVBUF:   equ 0a600h              ; track 2 sector 9 lands here at boot
+DCTL:     equ 0a1h                ; drive control: bit7 | dir-in | drive 1
 work:     equ 0ca70h              ; 5 x 4: new px,py,glyph,dirty
 
         org 08000h
@@ -82,6 +87,8 @@ iv1:
         ld   (hl),0
         inc  hl
         djnz iv1
+        call hsload             ; saved table from disk, else ROM seeds
+        jp   attract
 
 newgame:
         ld   sp,0fe00h          ; clean stack (ESC reset can arrive mid-call)
@@ -809,8 +816,14 @@ pd_f:
         ld   b,31
         ld   hl,str_over
         call puts
-        call getkey
-        jp   newgame
+        ld   b,120              ; ~2 s
+go_w:
+        push bc
+        call fsync
+        pop  bc
+        djnz go_w
+        call hscheck            ; new high score? -> initials entry
+        jp   attract
 
 ; ---------------------------------------------------------------------------
 ; spriteupd — two-pass, overlap-aware:
@@ -1647,6 +1660,461 @@ cstune:                         ; (half-period, cycles): bouncy 16-note loop
         db 78,70,  98,56,  65,84, 74,74
         db 0
 
+; ---------------------------------------------------------------------------
+; attract mode — title + ghost parade, alternating with the top-10 table.
+; Any key starts a game.
+; ---------------------------------------------------------------------------
+attract:
+        call attrA
+        jr   nz,at_go
+        call attrB
+        jr   z,attract
+at_go:
+        jp   newgame
+
+atkey:                          ; NZ = a key was pressed (and consumed)
+        in   a,(STAT2)
+        bit  6,a
+        ret  z
+        call kread
+        or   1
+        ret
+
+attrA:
+        call cls
+        ld   a,40
+        ld   (rowy),a
+        ld   b,32
+        ld   hl,str_title
+        call puts
+        ld   a,200
+        ld   (rowy),a
+        ld   b,27
+        ld   hl,str_press
+        call puts
+        ld   c,5                ; parade crossings
+aa0:
+        xor  a
+        ld   (csx),a
+aa1:
+        push bc
+        call fsync
+        call atkey
+        pop  bc
+        ret  nz
+        push bc
+        call paradeframe
+        pop  bc
+        ld   a,(csx)
+        add  a,2
+        ld   (csx),a
+        cp   146
+        jr   c,aa1
+        push bc
+        call wipestrip
+        pop  bc
+        dec  c
+        jr   nz,aa0
+        xor  a
+        ret
+
+paradeframe:                    ; pac chasing four ghosts at y=120
+        ld   a,(csx)
+        ld   d,a
+        ld   e,120
+        call cswipe
+        ld   a,(csx)
+        rrca
+        and  1
+        jr   z,pf1
+        ld   a,1
+        jr   pf2
+pf1:
+        xor  a
+pf2:
+        call sprdraw
+        ld   b,4
+        ld   a,(csx)
+        add  a,30
+pf3:
+        push bc
+        push af
+        ld   d,a
+        ld   e,120
+        call cswipe
+        ld   a,5
+        call sprdraw
+        pop  af
+        add  a,16
+        pop  bc
+        djnz pf3
+        ret
+
+wipestrip:
+        ld   b,11
+ws1:
+        ld   h,b
+        ld   l,120
+        ld   c,8
+ws2:
+        ld   (hl),0
+        inc  l
+        dec  c
+        jr   nz,ws2
+        inc  b
+        ld   a,b
+        cp   71
+        jr   nz,ws1
+        ret
+
+attrB:
+        call cls
+        ld   a,24
+        ld   (rowy),a
+        ld   b,29
+        ld   hl,str_hst
+        call puts
+        ld   ix,HST
+        ld   c,1                ; rank, BCD
+        ld   e,44               ; row
+atb1:
+        push de
+        push bc
+        ld   a,e
+        ld   (rowy),a
+        ld   b,24
+        ld   a,c
+        call puthex
+        ld   b,30
+        ld   a,(ix+0)
+        call putc
+        inc  b
+        inc  b
+        ld   a,(ix+1)
+        call putc
+        inc  b
+        inc  b
+        ld   a,(ix+2)
+        call putc
+        ld   b,42
+        ld   a,(ix+3)
+        call puthex
+        ld   a,(ix+4)
+        call puthex
+        ld   a,'0'
+        call putc
+        ld   de,5
+        add  ix,de
+        pop  bc
+        pop  de
+        ld   a,e
+        add  a,18
+        ld   e,a
+        ld   a,c
+        add  a,1
+        daa
+        ld   c,a
+        cp   11h
+        jr   c,atb1
+        ld   bc,480             ; ~8 s, polling
+atb2:
+        push bc
+        call fsync
+        call atkey
+        pop  bc
+        ret  nz
+        dec  bc
+        ld   a,b
+        or   c
+        jr   nz,atb2
+        xor  a
+        ret
+
+; ---------------------------------------------------------------------------
+; hscheck — does the final score make the table?  If so, shift, insert, and
+; take the player's initials.
+; ---------------------------------------------------------------------------
+hscheck:
+        ld   b,0
+        ld   hl,HST+3
+hs1:
+        ld   a,(scorehi)
+        cp   (hl)
+        jr   c,hsnx
+        jr   nz,hsfound
+        inc  hl
+        ld   a,(scorelo)
+        cp   (hl)
+        dec  hl
+        jr   c,hsnx
+        jr   z,hsnx
+        jr   hsfound
+hsnx:
+        ld   de,5
+        add  hl,de
+        inc  b
+        ld   a,b
+        cp   10
+        jr   c,hs1
+        ret
+hsfound:
+        ld   a,b
+        ld   (hsidx),a
+        ld   a,9                ; shift lower entries down one slot
+        sub  b
+        jr   z,hswr
+        ld   c,a
+        add  a,a
+        add  a,a
+        add  a,c
+        ld   c,a
+        ld   b,0
+        ld   hl,HST+44
+        ld   de,HST+49
+        lddr
+hswr:
+        ld   a,(hsidx)
+        ld   c,a
+        add  a,a
+        add  a,a
+        add  a,c
+        ld   c,a
+        ld   b,0
+        ld   hl,HST
+        add  hl,bc
+        ld   (hsins),hl
+        push hl
+        pop  de
+        inc  de
+        inc  de
+        inc  de
+        ld   a,(scorehi)
+        ld   (de),a
+        inc  de
+        ld   a,(scorelo)
+        ld   (de),a
+        ; fall into the initials screen
+; hsentry — typed initials, echoed as entered
+hsentry:
+        call cls
+        ld   a,60
+        ld   (rowy),a
+        ld   b,26
+        ld   hl,str_newhs
+        call puts
+        ld   a,84
+        ld   (rowy),a
+        ld   b,35
+        ld   a,(scorehi)
+        call puthex
+        ld   a,(scorelo)
+        call puthex
+        ld   a,'0'
+        call putc
+        ld   a,116
+        ld   (rowy),a
+        ld   b,21
+        ld   hl,str_init
+        call puts
+        ld   hl,(hsins)
+        ld   c,3
+        ld   b,36
+hse1:
+        push bc
+        push hl
+hse2:
+        call getkey
+        cp   'a'
+        jr   c,hse3
+        cp   'z'+1
+        jr   nc,hse3
+        sub  20h
+hse3:
+        cp   '0'
+        jr   c,hse2
+        cp   '9'+1
+        jr   c,hseok
+        cp   'A'
+        jr   c,hse2
+        cp   'Z'+1
+        jr   nc,hse2
+hseok:
+        pop  hl
+        pop  bc
+        ld   (hl),a
+        inc  hl
+        push hl
+        push bc
+        push af
+        ld   a,150
+        ld   (rowy),a
+        pop  af
+        call putc
+        pop  bc
+        pop  hl
+        inc  b
+        inc  b
+        inc  b
+        dec  c
+        jr   nz,hse1
+        call sndwin
+        call savehs             ; persist the table to track 2 sector 9
+        ld   b,60
+hse4:
+        push bc
+        call fsync
+        pop  bc
+        djnz hse4
+        ret
+
+; ---------------------------------------------------------------------------
+; hsload — adopt the saved table (loaded with track 2 at boot) if its magic
+; is valid, otherwise fall back to the ROM seed table.
+; ---------------------------------------------------------------------------
+hsload:
+        ld   hl,SAVBUF
+        ld   de,svmagic
+        ld   b,4
+hl1:
+        ld   a,(de)
+        cp   (hl)
+        jr   nz,hl_seed
+        inc  hl
+        inc  de
+        djnz hl1
+        ld   hl,SAVBUF+4
+        jr   hl_copy
+hl_seed:
+        ld   hl,hsseed
+hl_copy:
+        ld   de,HST
+        ld   bc,50
+        ldir
+        ret
+
+; ---------------------------------------------------------------------------
+; savehs — write the table to track 2, sector 9 (the head is parked on track
+; 2 by the loader and the game never seeks).  Follows the manual 3.7.7 write
+; protocol plus every hardware lesson from the Gotek campaign: IOCTL bit 4
+; held, cmd-5 motor keepalive + drive-control reload before the attempt, no
+; STAT2 reads at a mark, flag set within 150us of the mark edge.  Every wait
+; is bounded so a missing/protected disk aborts instead of hanging.
+; ---------------------------------------------------------------------------
+savehs:
+        in   a,(STAT1)
+        bit  4,a
+        ret  nz                 ; write-protected: keep scores RAM-only
+        ld   a,1dh
+        out  (IOCTL),a          ; cmd-5 event: motor on / keepalive
+        ld   bc,0
+sv_d1:
+        dec  bc
+        ld   a,b
+        or   c
+        jr   nz,sv_d1           ; ~400 ms
+        ld   a,DCTL
+        out  (081h),a           ; reload drive control (3.7.3 recovery)
+        ld   bc,0
+sv_d2:
+        dec  bc
+        ld   a,b
+        or   c
+        jr   nz,sv_d2
+        ld   a,1dh
+        out  (IOCTL),a          ; fresh cmd-5 event
+        ld   de,0               ; bounded search for sector 8
+sv_f:
+        in   a,(STAT2)
+        and  0fh                ; counter nibble only (bits 6/7 are kbd flags)
+        ld   b,a
+        in   a,(STAT2)
+        and  0fh
+        cp   b
+        jr   nz,sv_f2           ; unstable (mark passing): retry
+        cp   10
+        jr   nc,sv_f2           ; 0x0E dead / junk: retry
+        cp   8
+        jr   z,sv_mark
+sv_f2:
+        dec  de
+        ld   a,d
+        or   e
+        jr   nz,sv_f
+        jr   sv_out             ; no live counter: abort
+sv_mark:
+        ld   de,0               ; wait mark LOW
+sv_m0:
+        in   a,(STAT1)
+        bit  6,a
+        jr   z,sv_m1
+        dec  de
+        ld   a,d
+        or   e
+        jr   nz,sv_m0
+        jr   sv_out
+sv_m1:
+        ld   de,0               ; wait mark 0->1: start of sector 9
+sv_m2:
+        in   a,(STAT1)
+        bit  6,a
+        jr   nz,sv_wr
+        dec  de
+        ld   a,d
+        or   e
+        jr   nz,sv_m2
+        jr   sv_out
+sv_wr:
+        ld   a,1
+        out  (083h),a           ; write flag, within 150us of the edge
+        ld   b,34
+        xor  a
+sv_z:
+        out  (080h),a           ; preamble zeros (WAIT-paced by hardware)
+        djnz sv_z
+        ld   a,0fbh
+        out  (080h),a           ; sync byte 1
+        ld   a,029h
+        out  (080h),a           ; sync byte 2: sector 9 + 16*track 2
+        ld   c,0                ; CRC seed
+        ld   hl,svmagic         ; 512 data bytes: magic + table + zero fill
+        ld   b,4
+sv_g1:
+        ld   a,(hl)
+        inc  hl
+        out  (080h),a
+        xor  c
+        rlca
+        ld   c,a
+        djnz sv_g1
+        ld   hl,HST
+        ld   b,50
+sv_g2:
+        ld   a,(hl)
+        inc  hl
+        out  (080h),a
+        xor  c
+        rlca
+        ld   c,a
+        djnz sv_g2
+        ld   de,458
+sv_g3:
+        xor  a
+        out  (080h),a
+        xor  c
+        rlca
+        ld   c,a
+        dec  de
+        ld   a,d
+        or   e
+        jr   nz,sv_g3
+        ld   a,c
+        out  (080h),a           ; CRC (software-calculated, manual 3.7.7)
+sv_out:
+        ld   a,18h
+        out  (IOCTL),a          ; back to the keyboard-friendly baseline
+        ret
+svmagic: db "HST1"
+
 ; sndplay — play whatever the frame queued, after sprites are on screen
 sndplay:
         ld   a,(sndreq)
@@ -2311,7 +2779,20 @@ drawhud:
         ld   hl,str_score
         call puts
         call drawscore
-        ret
+        ld   a,60
+        ld   (rowy),a
+        ld   b,1
+        ld   hl,str_high
+        call puts
+        ld   a,72
+        ld   (rowy),a
+        ld   b,1
+        ld   a,(HST+3)
+        call puthex
+        ld   a,(HST+4)
+        call puthex
+        ld   a,'0'
+        jp   putc
 
 drawscore:
         xor  a
@@ -2912,6 +3393,23 @@ pcrw:
         ret
 
 str_score: db "SCORE",0
+str_high:  db "HIGH",0
+str_title: db "NSPACMAN",0
+str_press: db "PRESS ANY KEY",0
+str_hst:   db "HIGH SCORES",0
+str_newhs: db "NEW HIGH SCORE",0
+str_init:  db "ENTER YOUR INITIALS",0
+hsseed:
+        db "NSP",005h,000h
+        db "Z80",004h,050h
+        db "ADV",004h,000h
+        db "CPM",003h,050h
+        db "FDC",003h,000h
+        db "HXC",002h,050h
+        db "GRN",002h,000h
+        db "MED",001h,050h
+        db "BIT",001h,000h
+        db "DAV",000h,050h
 str_ready: db "READY!",0
 str_over:  db "GAME OVER",0
 
