@@ -54,7 +54,9 @@ csnp:     equ 0ca82h              ; cutscene tune pointer (2)
 hsidx:    equ 0ca84h              ; high-score insertion index
 hsins:    equ 0ca85h              ; -> initials slot in table (2)
 HST:      equ 0cb00h              ; 10 entries x 5: I,I,I,scorehi,scorelo
-SAVBUF:   equ 0a600h              ; track 2 sector 9 lands here at boot
+SAVBUF:   equ 0a200h              ; track 4 sector 5 lands here at boot
+HSTRK:    equ 4                   ; save track: empty except for the scores
+HSSEC:    equ 5
 DCTL:     equ 0a1h                ; drive control: bit7 | dir-in | drive 1
 work:     equ 0ca70h              ; 5 x 4: new px,py,glyph,dirty
 
@@ -1993,8 +1995,9 @@ hl_copy:
         ret
 
 ; ---------------------------------------------------------------------------
-; savehs — write the table to track 2, sector 9 (the head is parked on track
-; 2 by the loader and the game never seeks).  Follows the manual 3.7.7 write
+; savehs — write the table to track 4, sector 5 (the head is parked there by
+; the loader and the game never seeks; the track holds nothing else, so even
+; a mistargeted write is harmless).  Follows the manual 3.7.7 write
 ; protocol plus every hardware lesson from the Gotek campaign: IOCTL bit 4
 ; held, cmd-5 motor keepalive + drive-control reload before the attempt, no
 ; STAT2 reads at a mark, flag set within 150us of the mark edge.  Every wait
@@ -2020,49 +2023,73 @@ sv_d2:
         ld   a,b
         or   c
         jr   nz,sv_d2
+        ld   d,40               ; sync attempts, one body each
+sv_seek:
         ld   a,1dh
-        out  (IOCTL),a          ; fresh cmd-5 event
-        ld   de,0               ; bounded search for sector 8
-sv_f:
-        in   a,(STAT2)
-        and  0fh                ; counter nibble only (bits 6/7 are kbd flags)
-        ld   b,a
-        in   a,(STAT2)
-        and  0fh
-        cp   b
-        jr   nz,sv_f2           ; unstable (mark passing): retry
-        cp   10
-        jr   nc,sv_f2           ; 0x0E dead / junk: retry
-        cp   8
-        jr   z,sv_mark
-sv_f2:
-        dec  de
-        ld   a,d
-        or   e
-        jr   nz,sv_f
-        jr   sv_out             ; no live counter: abort
-sv_mark:
-        ld   de,0               ; wait mark LOW
-sv_m0:
+        out  (IOCTL),a          ; cmd-5 event per attempt (motor keepalive)
+        ; settle to the body: mark LOW first (stage1 v_lo ordering).  The
+        ; counter bumps MID-mark, so a debounce taken at a mark reads the
+        ; old sector id and would aim the write one sector late — that is
+        ; exactly the race that once let a save land outside its sector.
+        ld   bc,4000
+sv_lo:
         in   a,(STAT1)
         bit  6,a
-        jr   z,sv_m1
-        dec  de
-        ld   a,d
-        or   e
-        jr   nz,sv_m0
-        jr   sv_out
-sv_m1:
-        ld   de,0               ; wait mark 0->1: start of sector 9
-sv_m2:
+        jr   z,sv_db
+        dec  bc
+        ld   a,b
+        or   c
+        jr   nz,sv_lo
+        jr   sv_nxt
+sv_db:
+        ld   e,80h              ; debounce the body id (MEFD3 style)
+        ld   b,0
+sv_d3:
+        in   a,(STAT2)
+        and  0fh                ; counter nibble only (bits 6/7 are kbd flags)
+        cp   e
+        jr   z,sv_id
+        ld   e,a
+        djnz sv_d3
+        jr   sv_nxt
+sv_id:
+        cp   0eh
+        jr   z,sv_nxt           ; motor code: try again
+        cp   HSSEC-1            ; in the body just before the save sector?
+        jr   z,sv_edge
+sv_nxt:
+        dec  d
+        jp   z,sv_out           ; exhausted: scores stay RAM-only
+        ld   bc,2000            ; let the next hole arrive, then retry
+sv_sk:
+        in   a,(STAT1)
+        bit  6,a
+        jr   nz,sv_seek
+        dec  bc
+        ld   a,b
+        or   c
+        jr   nz,sv_sk
+        jr   sv_seek
+sv_edge:
+        ld   bc,6000            ; catch the mark rise: start of the save sector
+sv_e1:
         in   a,(STAT1)
         bit  6,a
         jr   nz,sv_wr
-        dec  de
-        ld   a,d
-        or   e
-        jr   nz,sv_m2
-        jr   sv_out
+        in   a,(STAT1)
+        bit  6,a
+        jr   nz,sv_wr
+        in   a,(STAT1)
+        bit  6,a
+        jr   nz,sv_wr
+        in   a,(STAT1)
+        bit  6,a
+        jr   nz,sv_wr
+        dec  bc
+        ld   a,b
+        or   c
+        jr   nz,sv_e1
+        jr   sv_nxt
 sv_wr:
         ld   a,1
         out  (083h),a           ; write flag, within 150us of the edge
@@ -2073,8 +2100,8 @@ sv_z:
         djnz sv_z
         ld   a,0fbh
         out  (080h),a           ; sync byte 1
-        ld   a,029h
-        out  (080h),a           ; sync byte 2: sector 9 + 16*track 2
+        ld   a,HSSEC+16*HSTRK
+        out  (080h),a           ; sync byte 2: sector + 16*track (0x45)
         ld   c,0                ; CRC seed
         ld   hl,svmagic         ; 512 data bytes: magic + table + zero fill
         ld   b,4

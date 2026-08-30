@@ -31,7 +31,8 @@ table back to that same floppy.
 - **Attract mode**: title screen with a ghost parade alternating with the
   top-10 table; any key starts a game
 - **High scores**: a qualifying score prompts for three typed initials.
-  The top-10 table is written back to the floppy (track 2, sector 9) using
+  The top-10 table is written back to the floppy (track 4, sector 5 — an
+  otherwise-empty track, two guard tracks away from any code) using
   the technical manual's §3.7.7 write protocol, so scores survive power-off —
   on real hardware the Gotek persists them into the HFE on the USB stick.
   On a write-protected disk scores simply live in RAM until power-off.

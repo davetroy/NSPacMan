@@ -38,6 +38,7 @@ MAP2:     equ 0a2h
 
 DEST:     equ 8000h
 NSEC:     equ 10
+HSSEC:    equ 5                 ; high-score sector on track 4
 DCTL:     equ 0a1h              ; drive control base: bit7 | bit5 dir-in | drive 1
 
 flags:    equ 0c900h
@@ -129,7 +130,54 @@ cli:
         ld   a,94h                      ; -> 0x9400 (0x8000 + 10 sectors)
         ld   (dstpg),a
         call loadtrk
+
+        ; ---- step in to track 4 and fetch the high-score sector ----
+        ; Track 3 is an empty guard band; track 4 holds nothing but the
+        ; save sector, so a botched write can never touch program code.
+        ld   b,2
+hstep:
+        push bc
+        ld   a,DCTL
+        out  (FDC_SYNC),a
+        or   10h
+        out  (FDC_SYNC),a
+        xor  10h
+        out  (FDC_SYNC),a
+        ld   a,28h
+        call dly
+        pop  bc
+        djnz hstep
+        ld   a,98h                      ; track 4 base -> 0x9800 (sector 5 = 0xA200)
+        ld   (dstpg),a
+        call loadone                    ; best effort; head stays on track 4
         jp   DEST
+
+; loadone — read only sector HSSEC of the current track (high-score data),
+; best-effort: a small budget, and on exhaustion it RETURNS instead of
+; halting — the game validates the magic and falls back to seed scores.
+loadone:
+        ld   hl,flags
+        ld   b,NSEC
+lo1:
+        ld   (hl),1                     ; pretend the others are done
+        inc  hl
+        djnz lo1
+        xor  a
+        ld   (flags+HSSEC),a
+        inc  a
+        ld   (remain),a
+        ld   a,40                       ; ~4 revolutions, then give up
+        ld   (budget),a
+lomain:
+        ld   a,(remain)
+        or   a
+        ret  z
+        ld   a,(budget)
+        dec  a
+        ld   (budget),a
+        ret  z                          ; boot anyway: scores just reseed
+        call readsec
+        jr   lomain
 
 ; loadtrk — read all ten sectors of the current track to (dstpg)<<8
 loadtrk:
