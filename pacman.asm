@@ -62,6 +62,9 @@ wdfx2:    equ 0ca8eh              ;   wobble partner freq (2)
 wstep:    equ 0ca90h              ; siren step scratch
 wkcnt:    equ 0ca91h              ; munch sweep: frames remaining
 wkfreq:   equ 0ca92h              ; munch sweep: current freq (2)
+sirlo:    equ 0ca94h              ; siren stage: floor (2)
+sirhi:    equ 0ca96h              ;   ceiling (2)
+sirstp:   equ 0ca98h              ;   step per frame
 HST:      equ 0cb00h              ; 10 entries x 5: I,I,I,scorehi,scorelo
 SAVBUF:   equ 0a200h              ; track 4 sector 5 lands here at boot
 HSTRK:    equ 4                   ; save track: empty except for the scores
@@ -3277,8 +3280,40 @@ wsgfrm:
         ld   a,h
         or   l
         jp   nz,wsf_fr
-        ld   hl,(sirf)          ; normal wail: bounce between bounds
-        ld   bc,4200
+        ld   hl,(dotslo)        ; stage: fuller maze = lower, slower wail
+        ld   b,0
+        ld   de,120
+        or   a
+        sbc  hl,de
+        jr   nc,wst_ok
+        inc  b
+        ld   hl,(dotslo)
+        ld   de,60
+        or   a
+        sbc  hl,de
+        jr   nc,wst_ok
+        inc  b
+        ld   hl,(dotslo)
+        ld   de,24
+        or   a
+        sbc  hl,de
+        jr   nc,wst_ok
+        inc  b
+wst_ok:
+        ld   a,b
+        add  a,a
+        ld   c,a
+        add  a,a
+        add  a,c                ; * 5
+        ld   c,a
+        ld   b,0
+        ld   hl,sirtab
+        add  hl,bc
+        ld   de,sirlo
+        ld   bc,5
+        ldir
+        ld   hl,(sirf)          ; wail: bounce between the stage bounds
+        ld   bc,(sirhi)
         or   a
         sbc  hl,bc
         add  hl,bc
@@ -3286,7 +3321,7 @@ wsgfrm:
         ld   a,1
         ld   (sird),a
 wsn1:
-        ld   bc,3000
+        ld   bc,(sirlo)
         or   a
         sbc  hl,bc
         add  hl,bc
@@ -3294,7 +3329,9 @@ wsn1:
         xor  a
         ld   (sird),a
 wsn2:
-        ld   de,60
+        ld   a,(sirstp)
+        ld   e,a
+        ld   d,0
         ld   a,(sird)
         or   a
         jr   nz,wsn3
@@ -3338,7 +3375,7 @@ wsf_set:
         jr   wsk_end
 wsk_go:
         ld   hl,(wkfreq)
-        ld   de,1600
+        ld   de,1000
         ld   a,(wakaflip)
         or   a
         jr   nz,wsk_up
@@ -3351,7 +3388,9 @@ wsk_w:
         ld   (wkfreq),hl
         ld   e,4
         call wgsetf
-        ld   a,3bh              ; vol 11, saw
+        ld   a,(wkcnt)          ; percussive: volume rides the countdown
+        add  a,6                ; 12,11,...,7
+        or   30h                ; saw
         ld   e,7
         call wgout
 wsk_end:
@@ -3366,17 +3405,17 @@ w_waka:                         ; arm a frame-driven munch sweep (~115 ms),
         ld   (hl),a             ; a dot row plays as continuous chatter.
         or   a
         jr   z,wwk_dn
-        ld   hl,4000            ; "ka" start
+        ld   hl,1800            ; "ka" start (low, thumpy band)
         jr   wwk_s
 wwk_dn:
-        ld   hl,14000           ; "wa" start
+        ld   hl,8000            ; "wa" start
 wwk_s:
         ld   (wkfreq),hl
         ld   a,7
         ld   (wkcnt),a
         ld   e,4                ; instant attack on this frame
         call wgsetf
-        ld   a,3bh              ; vol 11, saw
+        ld   a,3dh              ; vol 13, saw — decays as the sweep runs
         ld   e,7
         jp   wgout
 
@@ -3490,11 +3529,21 @@ wi1:
         rr   l
         ld   e,8
         call wgsetf
+        ld   e,l                ; harmony: a fifth over the bass (3/4 melody)
+        ld   d,h
+        srl  d
+        rr   e
+        add  hl,de
+        ld   e,0ch
+        call wgsetf
         ld   a,1dh              ; melody: vol 13, triangle
         ld   e,7
         call wgout
         ld   a,07h              ; bass: vol 7, sine
         ld   e,0bh
+        call wgout
+        ld   a,05h              ; harmony: vol 5, sine
+        ld   e,0fh
         call wgout
         pop  bc
         call wdly
@@ -3523,11 +3572,21 @@ wcs1:
         rr   l
         ld   e,8
         call wgsetf
+        ld   e,l
+        ld   d,h
+        srl  d
+        rr   e
+        add  hl,de              ; fifth over the bass
+        ld   e,0ch
+        call wgsetf
         ld   a,1dh
         ld   e,7
         call wgout
         ld   a,07h
         ld   e,0bh
+        call wgout
+        ld   a,04h
+        ld   e,0fh
         call wgout
         ld   b,71
         call wdly
@@ -3614,6 +3673,20 @@ wtune:                          ; intro fanfare (freq, ms), from the 1-bit tune
         dw   8574
         db   204
         dw   0
+sirtab:                         ; siren stages: floor, ceiling, step/frame
+        dw   3000
+        dw   4200
+        db   50
+        dw   3300
+        dw   4600
+        db   70
+        dw   3600
+        dw   5000
+        db   90
+        dw   4000
+        dw   5600
+        db   120
+
 wstune:                         ; per-life READY chime
         dw   11378
         db   29
