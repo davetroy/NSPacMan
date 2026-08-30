@@ -39,6 +39,8 @@ table back to that same floppy.
 - Steering: **WASD**, **IJKL**, keypad **8/4/6/2**, or the keypad arrow keys
   (`^H ^J ^K ^L` control codes); **ESC** restarts mid-game
 
+![Attract mode high-score table](highscores.png)
+
 ## Building
 
 Requires [z80asm](https://www.nongnu.org/z80asm/) (`brew install z80asm`)
