@@ -3260,8 +3260,10 @@ wsgquiet:                       ; all voices to volume 0
         call wgout
         ret
 
-; wsgfrm — per-frame siren on voice 2: slow wail in normal play, faster and
-; higher while the ghosts are frightened.  Self-corrects across transitions.
+; wsgfrm — per-frame siren on voice 2.  Normal play: a steady narrow wail
+; (3000..4200, one full cycle ~0.7 s).  While the ghosts are frightened it
+; switches to a different effect entirely: a fast looping rising sweep
+; ("waroo-waroo"), the classic pill sound.
 wsgfrm:
         ld   a,(wsgbase)
         or   a
@@ -3271,76 +3273,86 @@ wsgfrm:
         ld   hl,(frtimer)
         ld   a,h
         or   l
-        ld   a,30
-        ld   bc,5200
-        jr   z,wsf1
-        ld   a,90
-        ld   bc,7800
-wsf1:
-        ld   (wstep),a
-        ld   hl,(sirf)
+        jp   nz,wsf_fr
+        ld   hl,(sirf)          ; normal wail: bounce between bounds
+        ld   bc,4200
         or   a
         sbc  hl,bc
         add  hl,bc
-        jr   c,wsf2             ; below the ceiling
+        jr   c,wsn1
         ld   a,1
         ld   (sird),a
-wsf2:
-        ld   bc,2600
+wsn1:
+        ld   bc,3000
         or   a
         sbc  hl,bc
         add  hl,bc
-        jr   nc,wsf3            ; above the floor
+        jr   nc,wsn2
         xor  a
         ld   (sird),a
-wsf3:
-        ld   a,(wstep)
-        ld   e,a
-        ld   d,0
+wsn2:
+        ld   de,60
         ld   a,(sird)
         or   a
-        jr   nz,wsf4
+        jr   nz,wsn3
         add  hl,de
-        jr   wsf5
-wsf4:
+        jr   wsn4
+wsn3:
         or   a
         sbc  hl,de
-wsf5:
+wsn4:
+        ld   a,04h              ; vol 4, sine
+        jr   wsf_set
+wsf_fr:
+        ld   hl,(sirf)          ; frightened: rising saw loop, wraps fast
+        ld   de,150
+        add  hl,de
+        ld   bc,3300
+        or   a
+        sbc  hl,bc
+        add  hl,bc
+        jr   c,wsff1
+        ld   hl,1500
+wsff1:
+        ld   a,16h              ; vol 6, triangle
+wsf_set:
         ld   (sirf),hl
+        push af
         ld   e,0ch
         call wgsetf
-        ld   a,04h              ; vol 4, sine
+        pop  af
         ld   e,0fh
         call wgout
         pop  bc
         pop  de
         ret
 
-w_waka:                         ; one quick chomp gliss, direction alternating
-        ld   hl,wakaflip
-        ld   a,(hl)
-        cpl
+w_waka:                         ; one smooth chomp gliss, direction alternating
+        ld   hl,wakaflip        ; "wa" sweeps down, "ka" sweeps back up —
+        ld   a,(hl)             ; same band both ways, so successive dots
+        cpl                     ; chatter instead of stepping through notes
         ld   (hl),a
         or   a
-        ld   hl,14000
-        ld   de,-2200
+        ld   hl,12000
+        ld   de,-400
         jr   z,wwk1
-        ld   hl,5000
-        ld   de,2200
+        ld   hl,6000
+        ld   de,400
 wwk1:
         push de
         ld   a,3bh              ; vol 11, saw
         ld   e,7
         call wgout
         pop  de
-        ld   c,4
+        ld   c,15
 wwk2:
         push de
         ld   e,4
         call wgsetf
-        ld   b,2
-        call wdly
         pop  de
+        ld   b,120              ; ~0.4 ms per step: continuous to the ear
+wwk3:
+        djnz wwk3
         add  hl,de
         dec  c
         jr   nz,wwk2
