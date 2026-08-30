@@ -35,6 +35,52 @@ static const int MAXTRACKS=35;
 static bool writeArmed=false; static int wPhase, wIdx, wTarget, wTrack;
 static uint8_t wbuf[513]; static int writeCount=0, writeErrs=0;
 
+// ---- NS-WSG model (spec: NorthMac/Documentation/NSWSG.md) ------------------
+// Present at slot 3 (ports 0x30-0x3F, board ID 0xA5) unless RUNFULL_NOWSG is
+// set, for testing the game's 1-bit fallback.  Set RUNFULL_WAV=<path> to
+// render the card's output to a 96 kHz mono WAV.
+static int wsgPresent = 1;
+static uint8_t wsg_wave[256];
+static int wsg_wtidx, wsg_en;
+static uint32_t wsg_freq[3], wsg_acc[3];
+static int wsg_vol[3], wsg_sel[3];
+static int16_t* wavbuf = 0; static long wavn = 0, wavmax = 0;
+static double wsg_nexttick = 0;
+
+static void wsg_out(uint8_t reg, uint8_t val){
+    switch(reg){
+    case 0x0: wsg_wtidx = val; break;
+    case 0x1: wsg_wave[wsg_wtidx] = val & 0x0F; wsg_wtidx = (wsg_wtidx+1)&0xFF; break;
+    case 0x2: wsg_en = val & 1; if(!wsg_en) wsg_acc[0]=wsg_acc[1]=wsg_acc[2]=0; break;
+    default:
+        if(reg >= 4){
+            int v = (reg-4)/4;
+            switch((reg-4)&3){
+            case 0: wsg_freq[v]=(wsg_freq[v]&0xFFF00)|val; break;
+            case 1: wsg_freq[v]=(wsg_freq[v]&0xF00FF)|((uint32_t)val<<8); break;
+            case 2: wsg_freq[v]=(wsg_freq[v]&0x0FFFF)|((uint32_t)(val&0x0F)<<16); break;
+            default: wsg_vol[v]=val&0x0F; wsg_sel[v]=(val>>4)&7; break;
+            }
+        }
+    }
+}
+static void wsg_render(unsigned long long cyc){
+    if(!wavbuf) return;
+    while((double)cyc >= wsg_nexttick && wavn < wavmax){
+        float mix = 0.0f;
+        if(wsg_en) for(int v=0; v<3; v++){
+            if(!wsg_vol[v] || !wsg_freq[v]) continue;
+            wsg_acc[v] = (wsg_acc[v] + wsg_freq[v]) & 0xFFFFF;
+            int nib = wsg_wave[(wsg_sel[v]<<5) | (wsg_acc[v]>>15)];
+            mix += ((float)nib - 7.5f)/7.5f * ((float)wsg_vol[v]/15.0f);
+        }
+        mix *= 0.28f;
+        if(mix > 1.0f) mix = 1.0f; if(mix < -1.0f) mix = -1.0f;
+        wavbuf[wavn++] = (int16_t)(mix*32000.0f);
+        wsg_nexttick += 4000000.0/96000.0;
+    }
+}
+
 // ---- keyboard model --------------------------------------------------------
 static int kbd_char, kbd_flag, kbd_ack;
 static int spk_last; static long spk_toggles;
@@ -129,6 +175,8 @@ static void port_out_cb(z80* z, uint8_t port, uint8_t val){
             wTrack=trackNum;
             break;
         }
+    } else if(hi==0x03 && wsgPresent){
+        wsg_out(lo, val);
     } else if(port==0xF8){
         int spk=(val&0x40)?1:0;
         if(spk!=spk_last){ spk_toggles++; spk_last=spk; }
@@ -142,6 +190,8 @@ static void port_out_cb(z80* z, uint8_t port, uint8_t val){
 }
 static uint8_t port_in_cb(z80* z, uint8_t port){
     (void)z; uint8_t hi=port>>4, lo=port&0x0F;
+    if(hi==0x03 && wsgPresent) return lo==0x3 ? 0x57 : 0xFF;
+    if(hi==0x07 && wsgPresent && (lo&0x07)==3) return 0xA5;
     if(hi==0x08){
         switch(lo&3){
         case 0: { uint8_t d=(bytePtr<0x202)?dataBuffer[bytePtr]:0xFF;
@@ -206,6 +256,7 @@ static void boot_pass(const uint8_t* stage1, size_t s1len, unsigned long budget,
     int pulse=0; bool in_game=false;
     while(cpu.cyc<budget){
         z80_step(&cpu);
+        wsg_render(cpu.cyc);
         if(++pulse>=34){ pulse=0; floppy_state(); }
         if(!in_game && cpu.pc>=0x8000 && cpu.pc<0xC000){
             in_game=true;
@@ -224,8 +275,23 @@ static void boot_pass(const uint8_t* stage1, size_t s1len, unsigned long budget,
     o=fopen(path,"wb"); fwrite(RAM+0x0C900,1,0x300,o); fclose(o);
 }
 
+static void wav_write(const char* path){
+    FILE* f=fopen(path,"wb"); if(!f){perror("wav");return;}
+    long data=wavn*2; uint32_t u32; uint16_t u16;
+    fwrite("RIFF",1,4,f); u32=36+data; fwrite(&u32,4,1,f); fwrite("WAVE",1,4,f);
+    fwrite("fmt ",1,4,f); u32=16; fwrite(&u32,4,1,f);
+    u16=1; fwrite(&u16,2,1,f); u16=1; fwrite(&u16,2,1,f);
+    u32=96000; fwrite(&u32,4,1,f); u32=192000; fwrite(&u32,4,1,f);
+    u16=2; fwrite(&u16,2,1,f); u16=16; fwrite(&u16,2,1,f);
+    fwrite("data",1,4,f); u32=data; fwrite(&u32,4,1,f);
+    fwrite(wavbuf,2,wavn,f); fclose(f);
+    fprintf(stderr,"wav: %s (%ld samples, %.1f s)\n",path,wavn,wavn/96000.0);
+}
+
 int main(int argc,char**argv){
     if(argc<5){ fprintf(stderr,"usage: run_full stage1.bin disk.nsi prefix cycles1 [keys1] [cycles2 [keys2]]\n"); return 2; }
+    if(getenv("RUNFULL_NOWSG")) wsgPresent=0;
+    const char* wavpath=getenv("RUNFULL_WAV");
     RAM=malloc(256*1024);
     FILE* f=fopen(argv[2],"rb"); if(!f){perror("disk");return 1;}
     fseek(f,0,SEEK_END); DISK_LEN=ftell(f); fseek(f,0,SEEK_SET);
@@ -233,7 +299,12 @@ int main(int argc,char**argv){
     uint8_t stage1[4096]; f=fopen(argv[1],"rb"); if(!f){perror("stage1");return 1;}
     size_t s1len=fread(stage1,1,sizeof(stage1),f); fclose(f);
 
+    if(wavpath){
+        wavmax=(long)(strtoul(argv[4],0,10)/41.6667)+96000;
+        wavbuf=malloc(wavmax*2);
+    }
     boot_pass(stage1,s1len,strtoul(argv[4],0,10),(argc>5)?argv[5]:"",argv[3],1);
+    if(wavpath) wav_write(wavpath);
     fprintf(stderr,"save sector (file 0x3A00): ");
     for(int i=0;i<16;i++) fprintf(stderr,"%02X ",DISK[0x3A00+i]);
     fprintf(stderr,"\n");

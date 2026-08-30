@@ -53,6 +53,13 @@ csx:      equ 0ca80h              ; cutscene pac x
 csnp:     equ 0ca82h              ; cutscene tune pointer (2)
 hsidx:    equ 0ca84h              ; high-score insertion index
 hsins:    equ 0ca85h              ; -> initials slot in table (2)
+wsgbase:  equ 0ca87h              ; NS-WSG card base port (0 = not present)
+sirf:     equ 0ca88h              ; siren frequency (2)
+sird:     equ 0ca8ah              ; siren direction (0 up, 1 down)
+wdfxf:    equ 0ca8bh              ; death-warble scratch: freq (2)
+wdfxms:   equ 0ca8dh              ;   step duration ms
+wdfx2:    equ 0ca8eh              ;   wobble partner freq (2)
+wstep:    equ 0ca90h              ; siren step scratch
 HST:      equ 0cb00h              ; 10 entries x 5: I,I,I,scorehi,scorelo
 SAVBUF:   equ 0a200h              ; track 4 sector 5 lands here at boot
 HSTRK:    equ 4                   ; save track: empty except for the scores
@@ -90,6 +97,7 @@ iv1:
         inc  hl
         djnz iv1
         call hsload             ; saved table from disk, else ROM seeds
+        call wsgprobe           ; NS-WSG sound card? (emulated or real)
         jp   attract
 
 newgame:
@@ -106,6 +114,7 @@ newgame:
         ld   (introfl),a
 
 newlevel:
+        call wsgquiet
         call initdots
         call cls
         ld   hl,lastt+3         ; fresh canvas: forget on-screen sprites
@@ -139,6 +148,7 @@ mainloop:
         call nz,drawscore
         call ckbonus
         call sndplay
+        call wsgfrm             ; continuous siren on voice 2 (WSG only)
         ld   hl,(frtimer)
         ld   a,h
         or   l
@@ -801,6 +811,7 @@ cd_nx:
         ret
 
 pacdied:
+        call wsgquiet           ; siren off before the freeze
         ld   b,45               ; freeze the fatal moment (~3/4 s)
 pd_f:
         push bc
@@ -1342,6 +1353,15 @@ df_1:
         inc  hl
         ld   c,(hl)             ; C = warble base period
         inc  hl
+        ld   a,(hl)             ; WSG twin: freq + step ms
+        ld   (wdfxf),a
+        inc  hl
+        ld   a,(hl)
+        ld   (wdfxf+1),a
+        inc  hl
+        ld   a,(hl)
+        ld   (wdfxms),a
+        inc  hl
         push hl
         push bc
         call sprsave
@@ -1351,6 +1371,12 @@ df_1:
         call sprdraw
         pop  bc
         push de
+        ld   a,(wsgbase)
+        or   a
+        jr   z,df_1b
+        call w_dfxstep
+        jr   df_snd
+df_1b:
         ld   e,c                ; warble: two nearby pitches alternating
         ld   d,0
         ld   b,22
@@ -1365,20 +1391,36 @@ df_1:
         ld   d,0
         ld   b,14
         call tone16
+df_snd:
         pop  de
         call sprrest
         pop  hl
         jr   df_1
-dfxtab:                         ; glyph, warble-period
+dfxtab:                         ; glyph, warble-period, WSG freq, WSG ms
         db 0,80
+        dw 10503
+        db 60
         db 7,100
+        dw 8402
+        db 75
         db 8,124
+        dw 6776
+        db 93
         db 9,152
+        dw 5528
+        db 114
         db 10,184
+        dw 4566
+        db 138
         db 11,110
+        dw 7638
+        db 82
         db 0ffh
 
 dbloops:
+        ld   a,(wsgbase)
+        or   a
+        jp   nz,w_bloops
         ld   e,52               ; bleep
         ld   d,0
         ld   b,50
@@ -1514,6 +1556,9 @@ ckbonus:
         ret
 
 sndbonus:                       ; rapid rising chirps
+        ld   a,(wsgbase)
+        or   a
+        jp   nz,w_bonus
         ld   e,90
 sb1:
         ld   d,0
@@ -1531,9 +1576,15 @@ sb1:
 ; dark stage with its own looping tune (original music and choreography).
 ; ---------------------------------------------------------------------------
 cutscene:
+        call wsgquiet
         call sprwipe
         call cls
-        ld   hl,cstune
+        ld   hl,cstune          ; note table for this hardware
+        ld   a,(wsgbase)
+        or   a
+        jr   z,cs_tt
+        ld   hl,wcstune
+cs_tt:
         ld   (csnp),hl
         xor  a                  ; act 1: ghost flees right, pac in pursuit
         ld   (csx),a
@@ -1638,6 +1689,9 @@ cw2:
 
 ; csnote — next note of the looping intermission tune
 csnote:
+        ld   a,(wsgbase)
+        or   a
+        jp   nz,w_csnote
         push de
         ld   hl,(csnp)
         ld   a,(hl)
@@ -1667,6 +1721,7 @@ cstune:                         ; (half-period, cycles): bouncy 16-note loop
 ; Any key starts a game.
 ; ---------------------------------------------------------------------------
 attract:
+        call wsgquiet
         call attrA
         jr   nz,at_go
         call attrB
@@ -3098,6 +3153,478 @@ rn1:
         ret
 
 ; ---------------------------------------------------------------------------
+; NS-WSG driver — 3-voice wavetable card (spec: NorthMac/Documentation/
+; NSWSG.md).  Probed at boot; every effect has a WSG twin matched to its
+; 1-bit sibling's duration so gameplay cadence is identical either way.
+; Voice 0 = effects/melody, voice 1 = bass, voice 2 = continuous siren.
+; ---------------------------------------------------------------------------
+wsgprobe:
+        xor  a
+        ld   (wsgbase),a
+        ld   c,70h              ; board-ID ports: look for 0xA5
+        ld   b,6
+wpb1:
+        in   a,(c)
+        cp   0a5h
+        jr   z,wpb2
+        inc  c
+        djnz wpb1
+        ret
+wpb2:
+        ld   a,c
+        sub  70h
+        add  a,a
+        add  a,a
+        add  a,a
+        add  a,a                ; base = idIndex * 16
+        ld   (wsgbase),a
+        add  a,3
+        ld   c,a
+        in   a,(c)              ; confirm STATUS
+        cp   057h
+        jr   z,wpb3
+        xor  a
+        ld   (wsgbase),a
+        ret
+wpb3:
+        ld   a,(wsgbase)        ; upload our waveforms
+        ld   c,a
+        xor  a
+        out  (c),a
+        inc  c
+        ld   hl,wsgwav
+        ld   b,128
+wpb4:
+        ld   a,(hl)
+        inc  hl
+        out  (c),a
+        djnz wpb4
+        ld   a,(wsgbase)
+        add  a,2
+        ld   c,a
+        ld   a,1
+        out  (c),a              ; master enable (volumes stay 0)
+        ld   hl,2600
+        ld   (sirf),hl
+        xor  a
+        ld   (sird),a
+        jp   wsgquiet
+
+wgout:                          ; write A to WSG reg E (preserves A,E,BC)
+        push bc
+        push af
+        ld   a,(wsgbase)
+        add  a,e
+        ld   c,a
+        pop  af
+        out  (c),a
+        pop  bc
+        ret
+
+wgsetf:                         ; HL = freq -> voice FLO offset E (keeps HL,DE)
+        ld   a,l
+        call wgout
+        inc  e
+        ld   a,h
+        call wgout
+        inc  e
+        xor  a
+        call wgout
+        dec  e
+        dec  e
+        ret
+
+wdly:                           ; B milliseconds, busy
+wd1:
+        push bc
+        ld   bc,150
+wd2:
+        dec  bc
+        ld   a,b
+        or   c
+        jr   nz,wd2
+        pop  bc
+        djnz wd1
+        ret
+
+wsgquiet:                       ; all voices to volume 0
+        ld   a,(wsgbase)
+        or   a
+        ret  z
+        xor  a
+        ld   e,7
+        call wgout
+        ld   e,0bh
+        call wgout
+        ld   e,0fh
+        call wgout
+        ret
+
+; wsgfrm — per-frame siren on voice 2: slow wail in normal play, faster and
+; higher while the ghosts are frightened.  Self-corrects across transitions.
+wsgfrm:
+        ld   a,(wsgbase)
+        or   a
+        ret  z
+        push de
+        push bc
+        ld   hl,(frtimer)
+        ld   a,h
+        or   l
+        ld   a,30
+        ld   bc,5200
+        jr   z,wsf1
+        ld   a,90
+        ld   bc,7800
+wsf1:
+        ld   (wstep),a
+        ld   hl,(sirf)
+        or   a
+        sbc  hl,bc
+        add  hl,bc
+        jr   c,wsf2             ; below the ceiling
+        ld   a,1
+        ld   (sird),a
+wsf2:
+        ld   bc,2600
+        or   a
+        sbc  hl,bc
+        add  hl,bc
+        jr   nc,wsf3            ; above the floor
+        xor  a
+        ld   (sird),a
+wsf3:
+        ld   a,(wstep)
+        ld   e,a
+        ld   d,0
+        ld   a,(sird)
+        or   a
+        jr   nz,wsf4
+        add  hl,de
+        jr   wsf5
+wsf4:
+        or   a
+        sbc  hl,de
+wsf5:
+        ld   (sirf),hl
+        ld   e,0ch
+        call wgsetf
+        ld   a,04h              ; vol 4, sine
+        ld   e,0fh
+        call wgout
+        pop  bc
+        pop  de
+        ret
+
+w_waka:                         ; one quick chomp gliss, direction alternating
+        ld   hl,wakaflip
+        ld   a,(hl)
+        cpl
+        ld   (hl),a
+        or   a
+        ld   hl,14000
+        ld   de,-2200
+        jr   z,wwk1
+        ld   hl,5000
+        ld   de,2200
+wwk1:
+        push de
+        ld   a,3bh              ; vol 11, saw
+        ld   e,7
+        call wgout
+        pop  de
+        ld   c,4
+wwk2:
+        push de
+        ld   e,4
+        call wgsetf
+        ld   b,2
+        call wdly
+        pop  de
+        add  hl,de
+        dec  c
+        jr   nz,wwk2
+        jp   wv0off
+
+w_pill:                         ; rising gulp
+        ld   a,1ah              ; vol 10, triangle
+        ld   e,7
+        call wgout
+        ld   hl,6000
+        ld   c,6
+wpl1:
+        ld   e,4
+        call wgsetf
+        ld   b,6
+        call wdly
+        ld   de,1400
+        add  hl,de
+        dec  c
+        jr   nz,wpl1
+        jr   wv0off
+
+w_eatg:                         ; long ascending zip + sparkle
+        ld   a,3dh              ; vol 13, saw
+        ld   e,7
+        call wgout
+        ld   hl,3800
+        ld   c,24
+weg1:
+        ld   e,4
+        call wgsetf
+        ld   b,11
+        call wdly
+        ld   de,650
+        add  hl,de
+        dec  c
+        jr   nz,weg1
+        ld   a,1dh              ; sparkle on triangle
+        ld   e,7
+        call wgout
+        ld   hl,20000
+        ld   e,4
+        call wgsetf
+        ld   b,25
+        call wdly
+        ld   hl,24000
+        call wgsetf
+        ld   b,25
+        call wdly
+        jr   wv0off
+
+w_bonus:                        ; six rising chirps (extra life!)
+        ld   hl,9000
+        ld   c,6
+wbn1:
+        ld   a,1ch              ; vol 12, triangle
+        ld   e,7
+        call wgout
+        ld   e,4
+        call wgsetf
+        ld   b,24
+        call wdly
+        xor  a
+        ld   e,7
+        call wgout
+        ld   b,6
+        call wdly
+        push hl                 ; freq *= 1.25
+        srl  h
+        rr   l
+        srl  h
+        rr   l
+        pop  de
+        add  hl,de
+        dec  c
+        jr   nz,wbn1
+        ret
+
+wv0off:
+        xor  a
+        ld   e,7
+        call wgout
+        ret
+
+; two-voice table player: (dw freq, db ms)*, dw 0 end — melody voice 0,
+; bass one octave down on voice 1.  Used by the intro and the level fanfare.
+w_intro:
+        ld   hl,wtune
+        jr   wi1
+w_start:
+        ld   hl,wstune
+        jr   wi1
+w_win:
+        ld   hl,wwtune
+wi1:
+        ld   e,(hl)
+        inc  hl
+        ld   d,(hl)
+        inc  hl
+        ld   a,e
+        or   d
+        jp   z,wsgquiet
+        ld   b,(hl)             ; ms
+        inc  hl
+        push hl
+        push bc
+        push de
+        ex   de,hl
+        ld   e,4
+        call wgsetf
+        pop  hl                 ; the freq again
+        srl  h
+        rr   l
+        ld   e,8
+        call wgsetf
+        ld   a,1dh              ; melody: vol 13, triangle
+        ld   e,7
+        call wgout
+        ld   a,07h              ; bass: vol 7, sine
+        ld   e,0bh
+        call wgout
+        pop  bc
+        call wdly
+        pop  hl
+        jr   wi1
+
+w_csnote:                       ; intermission tune, legato with octave bass
+        push de
+        ld   hl,(csnp)
+        ld   a,(hl)
+        or   a
+        jr   nz,wcs1
+        ld   hl,wcstune
+wcs1:
+        ld   e,(hl)
+        inc  hl
+        ld   d,(hl)
+        inc  hl
+        ld   (csnp),hl
+        push de
+        ex   de,hl
+        ld   e,4
+        call wgsetf
+        pop  hl
+        srl  h
+        rr   l
+        ld   e,8
+        call wgsetf
+        ld   a,1dh
+        ld   e,7
+        call wgout
+        ld   a,07h
+        ld   e,0bh
+        call wgout
+        ld   b,71
+        call wdly
+        pop  de
+        ret
+
+w_dfxstep:                      ; death warble: one collapse step, wobbling
+        ld   hl,(wdfxf)
+        ld   e,l
+        ld   d,h
+        srl  d
+        rr   e
+        srl  d
+        rr   e
+        srl  d
+        rr   e                  ; freq/8
+        or   a
+        sbc  hl,de
+        ld   (wdfx2),hl         ; wobble partner
+        ld   a,(wdfxms)
+        srl  a
+        srl  a
+        ld   d,a                ; ms per quarter
+        ld   a,1ch              ; vol 12, triangle
+        ld   e,7
+        call wgout
+        ld   c,4
+wdf1:
+        ld   a,c
+        and  1
+        jr   z,wdf2
+        ld   hl,(wdfxf)
+        jr   wdf3
+wdf2:
+        ld   hl,(wdfx2)
+wdf3:
+        ld   e,4
+        call wgsetf
+        ld   b,d
+        call wdly
+        dec  c
+        jr   nz,wdf1
+        ret
+
+w_bloops:                       ; the two final low bloops
+        ld   a,0ch              ; vol 12, sine
+        ld   e,7
+        call wgout
+        ld   hl,16159
+        ld   e,4
+        call wgsetf
+        ld   b,34
+        call wdly
+        xor  a
+        ld   e,7
+        call wgout
+        ld   c,5                ; ~1.15 s beat of silence
+wbl1:
+        ld   b,230
+        call wdly
+        dec  c
+        jr   nz,wbl1
+        ld   a,0ch
+        ld   e,7
+        call wgout
+        ld   hl,16159
+        ld   e,4
+        call wgsetf
+        ld   b,34
+        call wdly
+        jp   wv0off
+
+wtune:                          ; intro fanfare (freq, ms), from the 1-bit tune
+        dw   5716
+        db   99
+        dw   11355
+        db   101
+        dw   8574
+        db   99
+        dw   7181
+        db   100
+        dw   11355
+        db   101
+        dw   8574
+        db   204
+        dw   0
+wstune:                         ; per-life READY chime
+        dw   11378
+        db   29
+        dw   15170
+        db   22
+        dw   22756
+        db   19
+        dw   0
+wwtune:                         ; level fanfare
+        dw   17067
+        db   26
+        dw   22756
+        db   19
+        dw   34134
+        db   19
+        dw   0
+wcstune:                        ; intermission loop (2-byte stride, like cstune)
+        dw   5716
+        dw   7181
+        dw   8574
+        dw   11355
+        dw   8574
+        dw   11355
+        dw   14487
+        dw   11355
+        dw   9658
+        dw   7638
+        dw   9658
+        dw   11355
+        dw   10772
+        dw   8574
+        dw   12927
+        dw   11355
+        dw   0
+wsgwav:                         ; 0 sine, 1 triangle, 2 pulse, 3 double saw
+        db  8,9,11,12,13,14,14,15,15,15,14,14,13,12,11,9
+        db  8,6,4,3,2,1,1,0,0,0,1,1,2,3,4,6
+        db  0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+        db  15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0
+        db  15,15,15,15,15,15,15,15,0,0,0,0,0,0,0,0
+        db  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        db  0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+        db  0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+
+; ---------------------------------------------------------------------------
 ; sound — square waves on IOCTL bit 6, bit 4 always held
 ; ---------------------------------------------------------------------------
 tone:                           ; B = half-period, C = cycles
@@ -3123,6 +3650,9 @@ tn3:
         ret
 
 sndwaka:
+        ld   a,(wsgbase)
+        or   a
+        jp   nz,w_waka
         ld   hl,wakaflip
         ld   a,(hl)
         cpl
@@ -3136,6 +3666,9 @@ wk1:
         jp   tone
 
 sndpill:
+        ld   a,(wsgbase)
+        or   a
+        jp   nz,w_pill
         ld   b,160
 sp1:
         ld   c,4
@@ -3148,6 +3681,9 @@ sp1:
         ret
 
 sndeatg:
+        ld   a,(wsgbase)
+        or   a
+        jp   nz,w_eatg
         ld   e,220              ; bubbling two-octave riser
 se1:
         ld   d,0
@@ -3215,6 +3751,9 @@ d16a:
 
 ; sndintro — an original chiptune fanfare (the arcade tune is copyrighted)
 sndintro:
+        ld   a,(wsgbase)
+        or   a
+        jp   nz,w_intro
         ld   hl,tune
 sn_i:
         ld   a,(hl)
@@ -3243,6 +3782,9 @@ tune:                           ; (half-period, cycles) pairs; ascending flouris
         db 0
 
 sndstart:
+        ld   a,(wsgbase)
+        or   a
+        jp   nz,w_start
         ld   b,120
         ld   c,30
         call tone
@@ -3254,6 +3796,9 @@ sndstart:
         jp   tone
 
 sndwin:
+        ld   a,(wsgbase)
+        or   a
+        jp   nz,w_win
         ld   b,80
         ld   c,40
         call tone
