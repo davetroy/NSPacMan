@@ -60,6 +60,8 @@ wdfxf:    equ 0ca8bh              ; death-warble scratch: freq (2)
 wdfxms:   equ 0ca8dh              ;   step duration ms
 wdfx2:    equ 0ca8eh              ;   wobble partner freq (2)
 wstep:    equ 0ca90h              ; siren step scratch
+wkcnt:    equ 0ca91h              ; munch sweep: frames remaining
+wkfreq:   equ 0ca92h              ; munch sweep: current freq (2)
 HST:      equ 0cb00h              ; 10 entries x 5: I,I,I,scorehi,scorelo
 SAVBUF:   equ 0a200h              ; track 4 sector 5 lands here at boot
 HSTRK:    equ 4                   ; save track: empty except for the scores
@@ -3252,6 +3254,7 @@ wsgquiet:                       ; all voices to volume 0
         or   a
         ret  z
         xor  a
+        ld   (wkcnt),a
         ld   e,7
         call wgout
         ld   e,0bh
@@ -3323,40 +3326,59 @@ wsf_set:
         pop  af
         ld   e,0fh
         call wgout
+        ld   a,(wkcnt)          ; munch sweep in flight?
+        or   a
+        jr   z,wsk_end
+        dec  a
+        ld   (wkcnt),a
+        jr   nz,wsk_go
+        xor  a                  ; sweep done: silence voice 0
+        ld   e,7
+        call wgout
+        jr   wsk_end
+wsk_go:
+        ld   hl,(wkfreq)
+        ld   de,1600
+        ld   a,(wakaflip)
+        or   a
+        jr   nz,wsk_up
+        or   a
+        sbc  hl,de
+        jr   wsk_w
+wsk_up:
+        add  hl,de
+wsk_w:
+        ld   (wkfreq),hl
+        ld   e,4
+        call wgsetf
+        ld   a,3bh              ; vol 11, saw
+        ld   e,7
+        call wgout
+wsk_end:
         pop  bc
         pop  de
         ret
 
-w_waka:                         ; one smooth chomp gliss, direction alternating
-        ld   hl,wakaflip        ; "wa" sweeps down, "ka" sweeps back up —
-        ld   a,(hl)             ; same band both ways, so successive dots
-        cpl                     ; chatter instead of stepping through notes
-        ld   (hl),a
+w_waka:                         ; arm a frame-driven munch sweep (~115 ms),
+        ld   hl,wakaflip        ; advanced by wsgfrm like the arcade did at
+        ld   a,(hl)             ; 60 Hz: "wa" sweeps down, "ka" sweeps up.
+        cpl                     ; Non-blocking, so the game never stalls and
+        ld   (hl),a             ; a dot row plays as continuous chatter.
         or   a
-        ld   hl,12000
-        ld   de,-400
-        jr   z,wwk1
-        ld   hl,6000
-        ld   de,400
-wwk1:
-        push de
+        jr   z,wwk_dn
+        ld   hl,4000            ; "ka" start
+        jr   wwk_s
+wwk_dn:
+        ld   hl,14000           ; "wa" start
+wwk_s:
+        ld   (wkfreq),hl
+        ld   a,7
+        ld   (wkcnt),a
+        ld   e,4                ; instant attack on this frame
+        call wgsetf
         ld   a,3bh              ; vol 11, saw
         ld   e,7
-        call wgout
-        pop  de
-        ld   c,15
-wwk2:
-        push de
-        ld   e,4
-        call wgsetf
-        pop  de
-        ld   b,120              ; ~0.4 ms per step: continuous to the ear
-wwk3:
-        djnz wwk3
-        add  hl,de
-        dec  c
-        jr   nz,wwk2
-        jp   wv0off
+        jp   wgout
 
 w_pill:                         ; rising gulp
         ld   a,1ah              ; vol 10, triangle
